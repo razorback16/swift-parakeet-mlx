@@ -33,14 +33,14 @@ Add the following to your `Package.swift` file:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/slipboxai/parakeet-mlx-swift", branch: "main")
+    .package(url: "https://github.com/seamlesscompute/parakeet-mlx-swift", branch: "main")
 ]
 ```
 
 Or add it through Xcode:
 
 1. **File → Add Package Dependencies**
-2. **Enter the repository URL**: `https://github.com/slipboxai/parakeet-mlx-swift`
+2. **Enter the repository URL**: `https://github.com/seamlesscompute/parakeet-mlx-swift`
 3. **Select the version range** or use `main` branch
 
 ## 🚀 Quick Start
