@@ -352,7 +352,6 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
     // Metal kernel implementations to match Python version exactly
     private func matmulQK(_ q: MLXArray, _ k: MLXArray, w: Int) -> MLXArray {
         let kernelSource = """
-            // D, W are provided as constant
             uint B = q_shape[0];
             uint H = q_shape[1];
             uint S_q = q_shape[2];
@@ -362,11 +361,13 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
             uint target_idx = thread_position_in_grid.x;
             uint k_rel_idx = thread_position_in_grid.y;
 
+            if (target_idx >= B * H * S_q) return;
+
             uint s_q_idx = target_idx % S_q;
             uint remaining_idx = target_idx / S_q;
             uint h_idx = remaining_idx % H;
             uint b_idx = remaining_idx / H;
-            uint k_offset = uint(int(k_rel_idx));
+            uint k_offset = k_rel_idx;
 
             uint stick_q_k_idx = S_k - S_q + s_q_idx;
             // stick to right (assuming S_k >= S_q)
@@ -374,7 +375,7 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
             int s_k_idx_signed = int(stick_q_k_idx) + int(k_offset) - int(W);
             bool is_out_of_bounds = (s_k_idx_signed < 0) || (s_k_idx_signed >= S_k);
 
-            float current_sum = 0.0f;
+            T result;
 
             if (!is_out_of_bounds) {
                 uint s_k_idx = uint(s_k_idx_signed);
@@ -396,19 +397,59 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
                 const device T* q_vec_ptr = q + q_base_offset;
                 const device T* k_vec_ptr = k + k_base_offset;
 
-                for (uint d_idx = 0; d_idx < D; ++d_idx) {
-                    current_sum += (float)(q_vec_ptr[d_idx]) * (float)(k_vec_ptr[d_idx]);
+                result = T(0.0);
+                uint d_idx = 0;
+
+                // hand unrolling
+                for (; d_idx + 16 <= D; d_idx += 16) {
+                    T q_vals[16], k_vals[16];
+
+                    for (uint i = 0; i < 16; ++i) {
+                        q_vals[i] = q_vec_ptr[d_idx + i];
+                        k_vals[i] = k_vec_ptr[d_idx + i];
+                    }
+
+                    result +=
+                        q_vals[0] * k_vals[0] + q_vals[1] * k_vals[1] +
+                        q_vals[2] * k_vals[2] + q_vals[3] * k_vals[3] +
+                        q_vals[4] * k_vals[4] + q_vals[5] * k_vals[5] +
+                        q_vals[6] * k_vals[6] + q_vals[7] * k_vals[7] +
+                        q_vals[8] * k_vals[8] + q_vals[9] * k_vals[9] +
+                        q_vals[10] * k_vals[10] + q_vals[11] * k_vals[11] +
+                        q_vals[12] * k_vals[12] + q_vals[13] * k_vals[13] +
+                        q_vals[14] * k_vals[14] + q_vals[15] * k_vals[15];
                 }
+
+                for (; d_idx + 8 <= D; d_idx += 8) {
+                    result +=
+                        q_vec_ptr[d_idx] * k_vec_ptr[d_idx] +
+                        q_vec_ptr[d_idx + 1] * k_vec_ptr[d_idx + 1] +
+                        q_vec_ptr[d_idx + 2] * k_vec_ptr[d_idx + 2] +
+                        q_vec_ptr[d_idx + 3] * k_vec_ptr[d_idx + 3] +
+                        q_vec_ptr[d_idx + 4] * k_vec_ptr[d_idx + 4] +
+                        q_vec_ptr[d_idx + 5] * k_vec_ptr[d_idx + 5] +
+                        q_vec_ptr[d_idx + 6] * k_vec_ptr[d_idx + 6] +
+                        q_vec_ptr[d_idx + 7] * k_vec_ptr[d_idx + 7];
+                }
+
+                for (; d_idx + 4 <= D; d_idx += 4) {
+                    result +=
+                        q_vec_ptr[d_idx] * k_vec_ptr[d_idx] +
+                        q_vec_ptr[d_idx + 1] * k_vec_ptr[d_idx + 1] +
+                        q_vec_ptr[d_idx + 2] * k_vec_ptr[d_idx + 2] +
+                        q_vec_ptr[d_idx + 3] * k_vec_ptr[d_idx + 3];
+                }
+
+                for (; d_idx < D; ++d_idx) {
+                    result += q_vec_ptr[d_idx] * k_vec_ptr[d_idx];
+                }
+            } else {
+                result = T(-INFINITY);
             }
 
-            // out[b, h, s_q, k_rel]
             uint out_idx = target_idx * K_rel + k_rel_idx;
-            if (is_out_of_bounds) {
-                out[out_idx] = -INFINITY;
-            } else {
-                out[out_idx] = (T) current_sum;
-            }
-            """
+            out[out_idx] = result;
+        """
 
         let B = q.shape[0]
         let H = q.shape[1]
@@ -418,15 +459,48 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
 
         let outputShape = [B, H, S_q, 2 * w + 1]
 
-        let gridDimX = B * H * S_q
-        let gridDimY = 2 * w + 1
+        var gridDimX = B * H * S_q
+        var gridDimY = 2 * w + 1
         let gridDimZ = 1
 
-        let tgY = min(gridDimY, 32)
-        let tgX = min(gridDimX, 1024 / tgY)
+        gridDimX = max(1, gridDimX)
+        gridDimY = max(1, gridDimY)
+
+        var tgY: Int
+        var tgX: Int
+
+        // Heuristic for thread group sizes based on D, matching Python logic
+        if D >= 256 {
+            tgY = min(gridDimY, 4)
+            tgX = min(gridDimX, 256)
+        } else if D >= 128 {
+            tgY = min(gridDimY, 8)
+            tgX = min(gridDimX, 128)
+        } else if D >= 32 {
+            tgY = min(gridDimY, 16)
+            tgX = min(gridDimX, 64)
+        } else {
+            tgY = min(gridDimY, 32)
+            tgX = min(gridDimX, 32)
+        }
+
+        // Further adjust tgX as in the Python logic
+        if tgX > 32 {
+            tgX = 64
+        } else if tgX > 16 {
+            tgX = 32
+        } else if tgX > 8 {
+            tgX = 16
+        } else if tgX > 4 {
+            tgX = 8
+        } else {
+            tgX = max(tgX, 1)
+        }
+        tgX = max(tgX, 1)
+        tgY = max(tgY, 1)
 
         let kernelFn = MLX.MLXFast.metalKernel(
-            name: "local_qk_matmul",
+            name: "local_qk_perf",
             inputNames: ["q", "k"],
             outputNames: ["out"],
             source: kernelSource
@@ -439,8 +513,8 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
                 ("W", w),
                 ("D", D),
             ],
-            grid: (max(1, gridDimX), max(1, gridDimY), gridDimZ),
-            threadGroup: (max(1, tgX), max(1, tgY), 1),
+            grid: (gridDimX, gridDimY, gridDimZ),
+            threadGroup: (tgX, tgY, 1),
             outputShapes: [outputShape],
             outputDTypes: [q.dtype]
         )
