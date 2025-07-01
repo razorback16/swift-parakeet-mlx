@@ -26,7 +26,7 @@ Clone the repo and run the TranscriptionApp to test it out:
 
 ## Note
 
-From our experience, this is useful for testing and having a baseline understanding of Parakeet models but in production its quite resource intensive. For a more efficient and less power hungry approach, please take a look at our other opensourced solution, [FluidAudio](https://github.com/FluidInference/FluidAudioSwift)
+From our experience, this is useful for testing and gaining a baseline understanding of Parakeet models, but in production it is quite resource-intensive. For a more efficient and less power-hungry approach, please take a look at our other open-sourced solution, [FluidAudio](https://github.com/FluidInference/FluidAudioSwift).
 
 ## Installation
 
