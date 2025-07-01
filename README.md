@@ -6,6 +6,8 @@
 
 A Swift implementation of the Parakeet speech recognition models using MLX Swift. The code was translated from [senstella/parakeet-mlx](https://github.com/senstella/parakeet-mlx) - all credits go to the original creator. We are merely translating it to Swift so that we can use it to build iOS/macOS apps!
 
+From our experience, this is useful for testing and gaining a baseline understanding of Parakeet models, but in production it is quite resource-intensive. For a more efficient and less power-hungry approach, please take a look at our other open-sourced solution, [FluidAudio](https://github.com/FluidInference/FluidAudioSwift).
+
 **Note**: We have focused on the TDT (Token-Duration-Transducer) variant of the Parakeet model. We have only tested `mlx-community/parakeet-tdt-0.6b-v2`. If you want to use other variants, PRs are welcome! We also need to properly implement caching here as well. 
 
 Clone the repo and run the TranscriptionApp to test it out:
@@ -23,10 +25,6 @@ Clone the repo and run the TranscriptionApp to test it out:
 - **Model**: ~2.5GB (for mlx-community/parakeet-tdt-0.6b-v2)
 - **Audio processing**: ~100MB per minute of audio
 - **Recommended**: 8GB+ RAM for comfortable usage
-
-## Note
-
-From our experience, this is useful for testing and gaining a baseline understanding of Parakeet models, but in production it is quite resource-intensive. For a more efficient and less power-hungry approach, please take a look at our other open-sourced solution, [FluidAudio](https://github.com/FluidInference/FluidAudioSwift).
 
 ## Installation
 
