@@ -654,57 +654,25 @@ public class Conformer: Module {
         return (x, outLengths)
     }
 
+    /// Set the attention model for all conformer blocks dynamically.
+    /// - Parameters:
+    ///   - name: The attention type: "rel_pos", "rel_pos_local_attn", or "normal"
+    ///   - contextSize: The context size for local attention (default: (256, 256))
     public func setAttentionModel(
         _ name: String,
         contextSize: (Int, Int)? = (256, 256)
     ) {
-        // Update positional encoding
-        switch name {
-        case "rel_pos":
-            // Would need to replace posEnc with RelPositionalEncoding
-            break
-        case "rel_pos_local_attn":
-            // Would need to replace posEnc with LocalRelPositionalEncoding
-            break
-        default:
-            // Set to no positional encoding
-            break
-        }
-
-        // Update attention in all layers
+        // Note: Updating posEnc would require making it mutable and handling Module updates
+        // For now, we focus on updating the attention in layers which is the critical part
+        
+        // Update attention model in all conformer blocks
         for layer in layers {
             layer.setAttentionModel(name, contextSize: contextSize)
         }
     }
 }
 
-// MARK: - Cache Classes (simplified)
-
-public class ConformerCache {
-    public var offset: Int = 0
-
-    public init() {}
-
-    public func updateAndFetchConv(_ x: MLXArray, padding: Int) -> MLXArray {
-        // Simplified cache implementation
-        let padArray = Array(repeating: (0, 0), count: x.ndim)
-        var padArray2 = padArray
-        padArray2[1] = (padding, padding)
-        return MLX.padded(
-            x, widths: padArray2.map { IntOrPair($0) }, mode: .constant, value: MLXArray(0.0))
-    }
-}
-
-public class RotatingConformerCache: ConformerCache {
-    let contextSize: Int
-    let cacheDropSize: Int
-
-    public init(contextSize: Int, cacheDropSize: Int) {
-        self.contextSize = contextSize
-        self.cacheDropSize = cacheDropSize
-        super.init()
-    }
-}
+// Note: Cache classes have been moved to Cache.swift for better organization
 
 // MARK: - Utility Functions
 

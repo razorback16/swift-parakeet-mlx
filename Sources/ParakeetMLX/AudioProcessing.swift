@@ -4,7 +4,21 @@ import MLX
 
 // MARK: - Audio Processing Functions
 
+/// Apply pre-emphasis filter to audio signal
+/// - Parameters:
+///   - audio: Input audio signal as MLXArray
+///   - coefficient: Pre-emphasis coefficient (typically 0.97)
+/// - Returns: Pre-emphasized audio signal
+public func preEmphasis(_ audio: MLXArray, coefficient: Float = 0.97) -> MLXArray {
+    return applyPreEmphasis(audio, coefficient: coefficient)
+}
+
 /// Compute log mel spectrogram from audio data
+/// - Parameters:
+///   - audio: Input audio signal as MLXArray
+///   - config: Preprocessing configuration including window parameters, FFT size, etc.
+/// - Returns: Log mel spectrogram with shape [1, n_mels, n_frames]
+/// - Throws: ParakeetError if audio processing fails
 public func getLogMel(_ audio: MLXArray, config: PreprocessConfig) throws -> MLXArray {
     let originalDType = audio.dtype
     var x = audio
@@ -20,11 +34,10 @@ public func getLogMel(_ audio: MLXArray, config: PreprocessConfig) throws -> MLX
             value: MLXArray(config.padValue))
     }
 
-    // Apply pre-emphasis if configured
-    if let preemph = config.preemph {
-        let prefix = x[0..<1]
-        let diff = x[1...] - preemph * x[0..<(x.shape[0] - 1)]
-        x = MLX.concatenated([prefix, diff], axis: 0)
+    // Apply pre-emphasis filter if configured
+    // Pre-emphasis: y[n] = x[n] - α * x[n-1], where α is typically 0.97
+    if let preemph = config.preemph, preemph > 0 {
+        x = applyPreEmphasis(x, coefficient: preemph)
     }
 
     // Get window function
@@ -76,6 +89,24 @@ public func getLogMel(_ audio: MLXArray, config: PreprocessConfig) throws -> MLX
     return output.asType(originalDType)
 }
 
+// MARK: - Pre-emphasis Filter
+
+/// Apply pre-emphasis filter to audio signal
+/// Pre-emphasis: y[n] = x[n] - α * x[n-1]
+private func applyPreEmphasis(_ signal: MLXArray, coefficient: Float) -> MLXArray {
+    guard signal.shape[0] > 1 else { return signal }
+    
+    // Keep the first sample unchanged
+    let firstSample = signal[0..<1]
+    
+    // Apply pre-emphasis filter: x[n] - α * x[n-1]
+    let shifted = signal[0..<(signal.shape[0] - 1)]
+    let filtered = signal[1...] - coefficient * shifted
+    
+    // Concatenate the first sample with the filtered signal
+    return MLX.concatenated([firstSample, filtered], axis: 0)
+}
+
 // MARK: - Window Functions
 
 private func getWindow(_ windowType: String, length: Int, dtype: DType) throws -> MLXArray {
@@ -94,9 +125,19 @@ private func getWindow(_ windowType: String, length: Int, dtype: DType) throws -
 }
 
 private func hanningWindow(length: Int, dtype: DType) -> MLXArray {
+    // NumPy's hanning window formula: 0.5 - 0.5 * cos(2*pi*n/(N-1))
+    // This is equivalent to: 0.5 * (1 - cos(2*pi*n/(N-1)))
+    guard length > 1 else {
+        return MLXArray([1.0]).asType(dtype)
+    }
+    
     let n = Float(length)
     let indices = MLXArray(0..<length).asType(.float32)
-    let window = 0.5 * (1.0 - cos(2.0 * Float.pi * indices / (n - 1)))
+    
+    // Use the standard Hann window formula
+    // Note: For length=1, this would cause division by zero, hence the guard above
+    let window = 0.5 - 0.5 * cos(2.0 * Float.pi * indices / (n - 1))
+    
     return window.asType(dtype)
 }
 
@@ -136,49 +177,70 @@ private func stft(
     window: MLXArray
 ) throws -> MLXArray {
 
-    // Pad the window to nFFT length if needed
+    // Ensure the window is properly shaped as a 1D array
     var actualWindow = window
+    
+    // Pad or truncate the window to nFFT length if needed
     if winLength != nFFT {
         if winLength > nFFT {
+            // Truncate window if it's longer than nFFT
             actualWindow = window[0..<nFFT]
         } else {
+            // Pad window with zeros to match nFFT length
             let padding = nFFT - winLength
-            let padArray = [(0, padding)]
+            // Center the window by padding on both sides
+            let leftPad = padding / 2
+            let rightPad = padding - leftPad
+            let padArray = [(leftPad, rightPad)]
             actualWindow = MLX.padded(
                 window, widths: padArray.map { IntOrPair($0) }, mode: .constant,
                 value: MLXArray(0.0))
         }
     }
 
-    // Pad the signal
+    // Pad the signal using reflection padding (matching librosa's default)
     let padding = nFFT / 2
     var paddedX = x
 
-    // Reflect padding (simplified)
-    let prefix = x[1..<(padding + 1)].reversed(axes: [0])
-    let suffix = x[(x.shape[0] - padding - 1)..<(x.shape[0] - 1)].reversed(axes: [0])
-    paddedX = MLX.concatenated([prefix, x, suffix], axis: 0)
+    // Reflect padding to minimize edge artifacts
+    // This mirrors the signal at boundaries for better spectral analysis
+    if padding > 0 && x.shape[0] > padding {
+        let prefix = x[1..<min(padding + 1, x.shape[0])].reversed(axes: [0])
+        let suffixStart = max(0, x.shape[0] - padding - 1)
+        let suffixEnd = max(suffixStart, x.shape[0] - 1)
+        let suffix = x[suffixStart..<suffixEnd].reversed(axes: [0])
+        paddedX = MLX.concatenated([prefix, x, suffix], axis: 0)
+    } else if padding > 0 {
+        // If signal is too short for reflection, use zero padding
+        let padArray = [(padding, padding)]
+        paddedX = MLX.padded(
+            x, widths: padArray.map { IntOrPair($0) }, mode: .constant,
+            value: MLXArray(0.0))
+    }
 
-    // Create frames
-    let numFrames = (paddedX.shape[0] - nFFT + hopLength) / hopLength
+    // Create frames using sliding window approach
+    let numFrames = max(1, (paddedX.shape[0] - nFFT + hopLength) / hopLength)
     var frames: [MLXArray] = []
 
     for i in 0..<numFrames {
         let start = i * hopLength
         let end = start + nFFT
         if end <= paddedX.shape[0] {
+            // Apply window to each frame
             let frame = paddedX[start..<end] * actualWindow
             frames.append(frame)
         }
     }
 
     if frames.isEmpty {
-        throw ParakeetError.audioProcessingError("No frames could be extracted")
+        throw ParakeetError.audioProcessingError("No frames could be extracted from audio signal")
     }
 
+    // Stack frames into a 2D matrix [num_frames, nFFT]
     let frameMatrix = MLX.stacked(frames, axis: 0)
 
-    // Apply FFT
+    // Apply real-valued FFT along the last axis
+    // This returns complex values with shape [num_frames, nFFT/2 + 1]
     let fftResult = MLX.rfft(frameMatrix, axis: -1)
 
     return fftResult

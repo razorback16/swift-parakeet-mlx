@@ -1,4 +1,4 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.0
 
 import PackageDescription
 
@@ -40,6 +40,11 @@ let package = Package(
                 "ParakeetMLX"
             ],
             path: "Sources/TranscriptionApp"
+        ),
+        .testTarget(
+            name: "ParakeetMLXTests",
+            dependencies: ["ParakeetMLX"],
+            path: "Tests"
         ),
     ]
 )

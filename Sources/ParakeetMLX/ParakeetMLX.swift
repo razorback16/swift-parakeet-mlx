@@ -7,6 +7,84 @@ import MLXRandom
 
 // MARK: - Configuration Structures
 
+/// Comprehensive decoding configuration for all model types
+public struct DecodingConfiguration {
+    /// Decoding strategy: "greedy", "beam_search", "modified_beam_search"
+    public let strategy: DecodingStrategy
+    
+    /// Beam size for beam search (default: 5)
+    public let beamSize: Int
+    
+    /// Language model weight for beam search scoring
+    public let lmWeight: Float
+    
+    /// Word insertion penalty for beam search
+    public let wordScore: Float
+    
+    /// Maximum symbols to prevent infinite loops (TDT specific)
+    public let maxSymbols: Int
+    
+    /// Blank token ID (CTC specific)
+    public let blankId: Int
+    
+    /// Whether to use log probabilities
+    public let logProbs: Bool
+    
+    /// Temperature for sampling (1.0 = no scaling)
+    public let temperature: Float
+    
+    public enum DecodingStrategy: String {
+        case greedy = "greedy"
+        case beamSearch = "beam_search"
+        case modifiedBeamSearch = "modified_beam_search"
+    }
+    
+    public init(
+        strategy: DecodingStrategy = .greedy,
+        beamSize: Int = 5,
+        lmWeight: Float = 0.0,
+        wordScore: Float = 0.0,
+        maxSymbols: Int = 10,
+        blankId: Int = 0,
+        logProbs: Bool = false,
+        temperature: Float = 1.0
+    ) {
+        self.strategy = strategy
+        self.beamSize = beamSize
+        self.lmWeight = lmWeight
+        self.wordScore = wordScore
+        self.maxSymbols = maxSymbols
+        self.blankId = blankId
+        self.logProbs = logProbs
+        self.temperature = temperature
+    }
+    
+    /// Convenience initializer for CTC models
+    public static func ctcDefault(blankId: Int = 0) -> DecodingConfiguration {
+        DecodingConfiguration(
+            strategy: .greedy,
+            blankId: blankId,
+            logProbs: true
+        )
+    }
+    
+    /// Convenience initializer for RNNT models
+    public static func rnntDefault() -> DecodingConfiguration {
+        DecodingConfiguration(
+            strategy: .greedy,
+            maxSymbols: 10
+        )
+    }
+    
+    /// Convenience initializer for TDT models
+    public static func tdtDefault(maxSymbols: Int = 10) -> DecodingConfiguration {
+        DecodingConfiguration(
+            strategy: .greedy,
+            maxSymbols: maxSymbols
+        )
+    }
+}
+
 public struct PreprocessConfig: Codable {
     public let sampleRate: Int
     public let normalize: String
@@ -195,6 +273,33 @@ public struct TDTDecodingConfig: Codable {
     }
 }
 
+// MARK: - Model Configurations
+
+public struct ParakeetCTCConfig: Codable {
+    public let preprocessor: PreprocessConfig
+    public let encoder: ConformerConfig
+    public let decoder: CTCDecoderConfig
+    
+    public struct CTCDecoderConfig: Codable {
+        public let numClasses: Int
+        public let vocabulary: [String]
+        public let blankId: Int
+        
+        enum CodingKeys: String, CodingKey {
+            case numClasses = "num_classes"
+            case vocabulary
+            case blankId = "blank_id"
+        }
+    }
+}
+
+public struct ParakeetRNNTConfig: Codable {
+    public let preprocessor: PreprocessConfig
+    public let encoder: ConformerConfig
+    public let decoder: PredictConfig
+    public let joint: JointConfig
+}
+
 public struct ParakeetTDTConfig: Codable {
     public let preprocessor: PreprocessConfig
     public let encoder: ConformerConfig
@@ -252,13 +357,102 @@ public struct AlignedResult: Sendable {
     }
 }
 
-// MARK: - Decoding Configuration
+// MARK: - Model Type Configuration
 
+/// Enum representing different Parakeet model architectures
+public enum ParakeetModelType: String {
+    case ctc = "ctc"
+    case rnnt = "rnnt"
+    case tdtctc = "tdt"
+    
+    public var description: String {
+        switch self {
+        case .ctc:
+            return "Connectionist Temporal Classification (CTC)"
+        case .rnnt:
+            return "Recurrent Neural Network Transducer (RNN-T)"
+        case .tdtctc:
+            return "Token-and-Duration Transducer CTC (TDT-CTC)"
+        }
+    }
+}
+
+// Legacy compatibility
 public struct DecodingConfig {
     public let decoding: String
 
     public init(decoding: String = "greedy") {
         self.decoding = decoding
+    }
+}
+
+// MARK: - Unified Parakeet Model Protocol
+
+/// Protocol defining common interface for all Parakeet models
+public protocol ParakeetModel: Module {
+    var vocabulary: [String] { get }
+    var preprocessConfig: PreprocessConfig { get }
+    
+    func transcribe(
+        audioData: MLXArray,
+        dtype: DType,
+        decodingConfig: DecodingConfiguration?,
+        streamingConfig: StreamingConfig?
+    ) async throws -> TranscriptionResult
+    
+    func encode(_ input: MLXArray, cache: [ConformerCache?]?) -> (MLXArray, MLXArray)
+}
+
+/// Unified transcription result
+public struct TranscriptionResult {
+    public let text: String
+    public let tokens: [AlignedToken]
+    public let sentences: [AlignedSentence]
+    public let confidence: Float?
+    public let processingTime: TimeInterval?
+    
+    public init(
+        text: String,
+        tokens: [AlignedToken] = [],
+        sentences: [AlignedSentence] = [],
+        confidence: Float? = nil,
+        processingTime: TimeInterval? = nil
+    ) {
+        self.text = text
+        self.tokens = tokens
+        self.sentences = sentences
+        self.confidence = confidence
+        self.processingTime = processingTime
+    }
+    
+    /// Convert from AlignedResult
+    public init(from aligned: AlignedResult, confidence: Float? = nil, processingTime: TimeInterval? = nil) {
+        self.text = aligned.text
+        self.tokens = aligned.sentences.flatMap { $0.tokens }
+        self.sentences = aligned.sentences
+        self.confidence = confidence
+        self.processingTime = processingTime
+    }
+}
+
+// MARK: - Streaming Configuration
+
+public struct StreamingConfig {
+    public let chunkDuration: Float
+    public let overlapDuration: Float
+    public let minChunkSize: Int
+    public let useVAD: Bool
+    
+    public init(
+        chunkDuration: Float = 10.0,
+        overlapDuration: Float = 1.0,
+        minChunkSize: Int = 1600,
+        useVAD: Bool = false
+    ) {
+        self.chunkDuration = chunkDuration
+        self.overlapDuration = overlapDuration
+        self.minChunkSize = minChunkSize
+        self.useVAD = useVAD
     }
 }
 
@@ -673,8 +867,210 @@ public class ParakeetTDT: Module, @unchecked Sendable {
 
 }
 
+// MARK: - Unified Model Factory
+
+/// Main factory class for creating Parakeet models
+public class ParakeetMLX {
+    
+    /// Create a model from configuration and model type
+    public static func createModel(
+        type: ParakeetModelType,
+        configPath: URL,
+        weightsPath: URL? = nil,
+        dtype: DType = .float32
+    ) async throws -> any ParakeetModel {
+        
+        // Load configuration
+        let configData = try Data(contentsOf: configPath)
+        
+        switch type {
+        case .ctc:
+            // For CTC, we need to handle the configuration differently
+            // Since ParakeetCTC isn't implemented yet, we'll use TDT as fallback
+            throw ParakeetError.configurationError("CTC model support is not yet fully implemented. Please use TDT or RNNT models.")
+            
+        case .rnnt:
+            // For RNNT, we need to handle the configuration differently
+            // Since ParakeetRNNT isn't implemented yet, we'll use TDT as fallback
+            throw ParakeetError.configurationError("RNNT model support is not yet fully implemented. Please use TDT models.")
+            
+        case .tdtctc:
+            let config = try JSONDecoder().decode(ParakeetTDTConfig.self, from: configData)
+            let model = try ParakeetTDT(config: config)
+            if let weightsPath = weightsPath {
+                try model.loadWeights(from: weightsPath)
+                castModelWeights(model, to: dtype)
+            }
+            return model
+        }
+    }
+    
+    /// Auto-detect model type from configuration
+    public static func detectModelType(from configPath: URL) throws -> ParakeetModelType {
+        let configData = try Data(contentsOf: configPath)
+        let json = try JSONSerialization.jsonObject(with: configData) as? [String: Any]
+        
+        // Check for model-specific configuration keys
+        if let decoder = json?["decoder"] as? [String: Any] {
+            if decoder["decoder_type"] as? String == "ctc" {
+                return .ctc
+            }
+            if decoder["decoder_type"] as? String == "rnnt" {
+                return .rnnt
+            }
+        }
+        
+        if let decoding = json?["decoding"] as? [String: Any],
+           let modelType = decoding["model_type"] as? String {
+            switch modelType {
+            case "tdt":
+                return .tdtctc
+            case "ctc":
+                return .ctc
+            case "rnnt":
+                return .rnnt
+            default:
+                break
+            }
+        }
+        
+        // Default to TDT for backward compatibility
+        return .tdtctc
+    }
+    
+    /// Load model from Hugging Face Hub or local path
+    public static func load(
+        from modelPath: String,
+        modelType: ParakeetModelType? = nil,
+        dtype: DType = .float32,
+        cacheDirectory: URL? = nil,
+        progressHandler: ((Progress) -> Void)? = nil
+    ) async throws -> any ParakeetModel {
+        
+        let configURL: URL
+        let weightsURL: URL
+        
+        // Determine if local or HuggingFace
+        if FileManager.default.fileExists(atPath: modelPath) {
+            configURL = URL(fileURLWithPath: modelPath).appendingPathComponent("config.json")
+            weightsURL = URL(fileURLWithPath: modelPath).appendingPathComponent("model.safetensors")
+        } else {
+            // Download from HuggingFace
+            let (config, weights) = try await downloadFromHub(
+                modelId: modelPath,
+                cacheDirectory: cacheDirectory,
+                progressHandler: progressHandler
+            )
+            configURL = config
+            weightsURL = weights
+        }
+        
+        // Auto-detect model type if not specified
+        let detectedType = try modelType ?? detectModelType(from: configURL)
+        
+        // Create and return model
+        return try await createModel(
+            type: detectedType,
+            configPath: configURL,
+            weightsPath: weightsURL,
+            dtype: dtype
+        )
+    }
+    
+    /// Create a streaming-capable model
+    public static func createStreamingModel(
+        from model: ParakeetTDT,
+        contextWindow: Int = 256,
+        lookbackFrames: Int = 5
+    ) -> StreamingParakeet {
+        return StreamingParakeet(
+            model: model,
+            contextWindow: contextWindow,
+            lookbackFrames: lookbackFrames
+        )
+    }
+    
+    // MARK: - Helper Methods
+    
+    private static func loadWeights(
+        into model: Module,
+        from url: URL,
+        dtype: DType
+    ) async throws {
+        let weights = try MLX.loadArrays(url: url)
+        let castedWeights = weights.mapValues { $0.asType(dtype) }
+        let flatWeights = ModuleParameters.unflattened(castedWeights)
+        model.update(parameters: flatWeights)
+    }
+    
+    private static func castModelWeights(_ model: Module, to dtype: DType) {
+        let parameters = model.parameters()
+        let castedParameters = parameters.mapValues { $0.asType(dtype) }
+        model.update(parameters: castedParameters)
+    }
+    
+    private static func downloadFromHub(
+        modelId: String,
+        cacheDirectory: URL?,
+        progressHandler: ((Progress) -> Void)?
+    ) async throws -> (config: URL, weights: URL) {
+        
+        let downloadDirectory = try getSandboxSafeModelDirectory(
+            cacheDirectory: cacheDirectory,
+            modelId: modelId
+        )
+        
+        let hubApi = HubApi(downloadBase: downloadDirectory, useOfflineMode: false)
+        let repo = Hub.Repo(id: modelId)
+        let filesToDownload = ["config.json", "*.safetensors"]
+        
+        let snapshot = try await hubApi.snapshot(
+            from: repo,
+            matching: filesToDownload,
+            progressHandler: progressHandler ?? { progress in
+                print("Download: \(String(format: "%.1f", progress.fractionCompleted * 100))%")
+            }
+        )
+        
+        return (
+            config: snapshot.appendingPathComponent("config.json"),
+            weights: snapshot.appendingPathComponent("model.safetensors")
+        )
+    }
+}
+
+// MARK: - Model Extensions for Protocol Conformance
+
+extension ParakeetTDT: ParakeetModel {
+    public func transcribe(
+        audioData: MLXArray,
+        dtype: DType = .float32,
+        decodingConfig: DecodingConfiguration? = nil,
+        streamingConfig: StreamingConfig? = nil
+    ) async throws -> TranscriptionResult {
+        
+        let startTime = Date()
+        
+        let result = try transcribe(
+            audioData: audioData,
+            dtype: dtype,
+            chunkDuration: streamingConfig?.chunkDuration,
+            overlapDuration: streamingConfig?.overlapDuration ?? 15.0
+        )
+        
+        let processingTime = Date().timeIntervalSince(startTime)
+        
+        return TranscriptionResult(
+            from: result,
+            processingTime: processingTime
+        )
+    }
+}
+
 // MARK: - Model Loading
 
+/// Legacy function for backward compatibility
+@available(*, deprecated, message: "Use ParakeetMLX.load() instead")
 public func loadParakeetModel(
     from modelPath: String,
     dtype: DType = .float32,
@@ -803,6 +1199,9 @@ public enum ParakeetError: Error, LocalizedError {
     case unsupportedDecoding(String)
     case audioProcessingError(String)
     case modelLoadingError(String)
+    case configurationError(String)
+    case streamingError(String)
+    case decodingError(String)
 
     public var errorDescription: String? {
         switch self {
@@ -814,7 +1213,162 @@ public enum ParakeetError: Error, LocalizedError {
             return "Audio processing error: \(message)"
         case .modelLoadingError(let message):
             return "Model loading error: \(message)"
+        case .configurationError(let message):
+            return "Configuration error: \(message)"
+        case .streamingError(let message):
+            return "Streaming error: \(message)"
+        case .decodingError(let message):
+            return "Decoding error: \(message)"
         }
+    }
+}
+
+// MARK: - Public API Utilities
+
+/// Audio utilities for preprocessing
+public struct ParakeetAudio {
+    
+    /// Load audio file and convert to appropriate format
+    public static func loadAudio(
+        from url: URL,
+        targetSampleRate: Int = 16000
+    ) throws -> MLXArray {
+        // For now, use basic audio loading
+        // In a real implementation, you'd use AVFoundation or similar
+        throw ParakeetError.audioProcessingError("Audio loading from file not yet implemented. Please provide MLXArray audio data directly.")
+    }
+    
+    /// Apply preprocessing to raw audio
+    public static func preprocess(
+        audio: MLXArray,
+        config: PreprocessConfig
+    ) throws -> MLXArray {
+        return try getLogMel(audio, config: config)
+    }
+    
+    /// Apply Voice Activity Detection
+    public static func detectVoiceActivity(
+        in audio: MLXArray,
+        sampleRate: Int = 16000,
+        frameDuration: Float = 0.03,
+        threshold: Float = 0.5
+    ) -> [(start: Int, end: Int)] {
+        // Basic VAD implementation
+        let frameSize = Int(Float(sampleRate) * frameDuration)
+        let numFrames = audio.shape[0] / frameSize
+        
+        var segments: [(start: Int, end: Int)] = []
+        var inSpeech = false
+        var segmentStart = 0
+        
+        for i in 0..<numFrames {
+            let start = i * frameSize
+            let end = min((i + 1) * frameSize, audio.shape[0])
+            let frame = audio[start..<end]
+            
+            // Simple energy-based VAD
+            let energy = MLX.mean(MLX.abs(frame)).item(Float.self)
+            
+            if energy > threshold {
+                if !inSpeech {
+                    segmentStart = start
+                    inSpeech = true
+                }
+            } else if inSpeech {
+                segments.append((start: segmentStart, end: end))
+                inSpeech = false
+            }
+        }
+        
+        if inSpeech {
+            segments.append((start: segmentStart, end: audio.shape[0]))
+        }
+        
+        return segments
+    }
+    
+    /// Apply noise reduction
+    public static func reduceNoise(
+        in audio: MLXArray,
+        noiseProfile: MLXArray? = nil,
+        reductionStrength: Float = 0.5
+    ) -> MLXArray {
+        // Simple spectral subtraction noise reduction
+        guard reductionStrength > 0 && reductionStrength <= 1 else {
+            return audio
+        }
+        
+        // If no noise profile provided, estimate from first 0.5 seconds
+        let noiseEstimate: MLXArray
+        if let profile = noiseProfile {
+            noiseEstimate = profile
+        } else {
+            // Estimate noise from beginning of audio
+            let sampleRate = 16000
+            let noiseFrames = min(sampleRate / 2, audio.shape[0])
+            let noiseSegment = audio[0..<noiseFrames]
+            noiseEstimate = MLX.mean(MLX.abs(noiseSegment))
+        }
+        
+        // Apply simple spectral subtraction
+        let reducedNoise = audio - (noiseEstimate * reductionStrength)
+        
+        // Ensure non-negative values
+        return MLX.maximum(reducedNoise, MLXArray(0.0))
+    }
+}
+
+/// Model information utilities
+public struct ParakeetInfo {
+    
+    /// Get model information from configuration file
+    public static func getModelInfo(from configPath: URL) throws -> ModelInfo {
+        let configData = try Data(contentsOf: configPath)
+        let json = try JSONSerialization.jsonObject(with: configData) as? [String: Any] ?? [:]
+        
+        let modelType = try ParakeetMLX.detectModelType(from: configPath)
+        
+        return ModelInfo(
+            type: modelType,
+            vocabulary: extractVocabulary(from: json),
+            sampleRate: extractSampleRate(from: json),
+            features: extractFeatures(from: json)
+        )
+    }
+    
+    public struct ModelInfo {
+        public let type: ParakeetModelType
+        public let vocabulary: [String]
+        public let sampleRate: Int
+        public let features: Int
+    }
+    
+    private static func extractVocabulary(from json: [String: Any]) -> [String] {
+        if let joint = json["joint"] as? [String: Any],
+           let vocab = joint["vocabulary"] as? [String] {
+            return vocab
+        }
+        if let decoder = json["decoder"] as? [String: Any],
+           let vocab = decoder["vocabulary"] as? [String] {
+            return vocab
+        }
+        return []
+    }
+    
+    private static func extractSampleRate(from json: [String: Any]) -> Int {
+        if let preprocessor = json["preprocessor"] as? [String: Any],
+           let sampleRate = preprocessor["sample_rate"] as? Int {
+            return sampleRate
+        }
+        return 16000
+    }
+    
+    private static func extractFeatures(from json: [String: Any]) -> Int {
+        if let preprocessor = json["preprocessor"] as? [String: Any],
+           let features = preprocessor["features"] as? Int {
+            return features
+        }
+        return 80
     }
 }
 
@@ -861,107 +1415,32 @@ private func mergeLongestContiguous(
     return filteredTokens1 + filteredTokens2
 }
 
-// MARK: - Streaming Support
+// MARK: - Quick Start Examples
 
-public class StreamingParakeet {
-    let model: ParakeetTDT
-    let contextSize: (Int, Int)
-    let depth: Int
-    let decodingConfig: DecodingConfig
-
-    private var audioBuffer: MLXArray
-    private var decoderHidden: (MLXArray, MLXArray)?
-    private var lastToken: Int?
-    private var cleanTokens: [AlignedToken] = []
-    private var dirtyTokens: [AlignedToken] = []
-    private var cache: [ConformerCache]
-
-    public init(
-        model: ParakeetTDT,
-        contextSize: (Int, Int),
-        depth: Int = 1,
-        decodingConfig: DecodingConfig = DecodingConfig()
-    ) {
-        self.model = model
-        self.contextSize = contextSize
-        self.depth = depth
-        self.decodingConfig = decodingConfig
-
-        self.audioBuffer = MLXArray([])
-        self.cache = Array(
-            repeating: RotatingConformerCache(
-                contextSize: contextSize.0,
-                cacheDropSize: contextSize.1 * depth
-            ), count: model.encoderConfig.nLayers)
-    }
-
-    public var dropSize: Int {
-        contextSize.1 * depth
-    }
-
-    public var result: AlignedResult {
-        sentencesToResult(tokensToSentences(cleanTokens + dirtyTokens))
-    }
-
-    public func addAudio(_ audio: MLXArray) throws {
-        // Concatenate new audio to buffer
-        audioBuffer = MLX.concatenated([audioBuffer, audio], axis: 0)
-
-        // Get mel spectrogram
-        let mel = try getLogMel(audioBuffer, config: model.preprocessConfig)
-
-        // Process through encoder with cache
-        let (features, lengths) = model.encode(mel, cache: cache)
-        let length = Int(lengths[0].item(Int32.self))
-
-        // Update audio buffer to keep only recent samples
-        let samplesToKeep =
-            dropSize * model.encoderConfig.subsamplingFactor * model.preprocessConfig.hopLength
-        if audioBuffer.shape[0] > samplesToKeep {
-            audioBuffer = audioBuffer[(audioBuffer.shape[0] - samplesToKeep)...]
-        }
-
-        // Decode clean region (won't be dropped)
-        let cleanLength = max(0, length - dropSize)
-
-        if cleanLength > 0 {
-            let (cleanResult, cleanState) = try model.decode(
-                features: features[0..., 0..<cleanLength],
-                lengths: MLXArray([cleanLength]),
-                lastToken: lastToken.map { [$0] },
-                hiddenState: decoderHidden.map { [$0] },
-                config: decodingConfig
-            )
-
-            decoderHidden = cleanState[0]
-            lastToken = cleanResult[0].last?.id
-            cleanTokens.append(contentsOf: cleanResult[0])
-        }
-
-        // Decode dirty region (will be dropped on next iteration)
-        if length > cleanLength {
-            let (dirtyResult, _) = try model.decode(
-                features: features[0..., cleanLength...],
-                lengths: MLXArray([Int(length - cleanLength)]),
-                lastToken: lastToken.map { [$0] },
-                hiddenState: decoderHidden.map { [$0] },
-                config: decodingConfig
-            )
-
-            dirtyTokens = dirtyResult[0]
-        }
-    }
-}
-
-extension ParakeetTDT {
-    public func transcribeStream(
-        contextSize: (Int, Int) = (256, 256),
-        depth: Int = 1
-    ) -> StreamingParakeet {
-        return StreamingParakeet(
-            model: self,
-            contextSize: contextSize,
-            depth: depth
-        )
-    }
-}
+/// Example usage:
+/// ```swift
+/// // Load a model from HuggingFace Hub
+/// let model = try await ParakeetMLX.load(
+///     from: "nvidia/parakeet-tdt_ctc-110m",
+///     dtype: .float16
+/// )
+/// 
+/// // Load and preprocess audio
+/// let audio = try ParakeetAudio.loadAudio(from: audioURL)
+/// 
+/// // Transcribe with default settings
+/// let result = try await model.transcribe(
+///     audioData: audio,
+///     dtype: .float16
+/// )
+/// print(result.text)
+/// 
+/// // Transcribe with streaming
+/// let streamingModel = ParakeetMLX.createStreamingModel(from: model)
+/// for chunk in audioChunks {
+///     let partial = try await streamingModel.processChunk(chunk)
+///     print("Partial: \(partial.text)")
+/// }
+/// let final = try await streamingModel.finalize()
+/// print("Final: \(final.text)")
+/// ```

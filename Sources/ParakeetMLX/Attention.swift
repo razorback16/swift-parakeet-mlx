@@ -49,14 +49,20 @@ public class MultiHeadAttention: Module {
         let kReshaped = k.reshaped([batch, kSeq, nHeads, headDim]).transposed(axes: [0, 2, 1, 3])
         let vReshaped = v.reshaped([batch, kSeq, nHeads, headDim]).transposed(axes: [0, 2, 1, 3])
 
-        // if let cache = cache {
-        //     k, v = cache.updateAndFetchConv(k, v)
-        // }
+        var kFinal = kReshaped
+        var vFinal = vReshaped
+        
+        if let cache = cache {
+            // Update cache and get full key-value history
+            let (kCached, vCached) = cache.updateAndFetchKV(kReshaped, vReshaped)
+            kFinal = kCached
+            vFinal = vCached
+        }
 
         let o = MLX.scaledDotProductAttention(
             queries: qReshaped,
-            keys: kReshaped,
-            values: vReshaped,
+            keys: kFinal,
+            values: vFinal,
             scale: scale,
             mask: mask
         )
@@ -150,9 +156,15 @@ public class RelPositionMultiHeadAttention: MultiHeadAttention {
         let vReshaped = v.reshaped([batch, kSeq, nHeads, headDim]).transposed(axes: [0, 2, 1, 3])
         let pReshaped = p.reshaped([batch, posLen, nHeads, headDim]).transposed(axes: [0, 2, 1, 3])
 
-        // if let cache = cache {
-        //     k, v = cache.update_and_fetch_kv(k, v)
-        // }
+        var kFinal = kReshaped
+        var vFinal = vReshaped
+        
+        if let cache = cache {
+            // Update cache and get full key-value history
+            let (kCached, vCached) = cache.updateAndFetchKV(kReshaped, vReshaped)
+            kFinal = kCached
+            vFinal = vCached
+        }
 
         let matrixBD = MLX.matmul(qV, pReshaped.swappedAxes(-2, -1))
         let matrixBDShifted = self.relShift(matrixBD)
@@ -179,8 +191,8 @@ public class RelPositionMultiHeadAttention: MultiHeadAttention {
 
         let o = MLX.scaledDotProductAttention(
             queries: qU,
-            keys: kReshaped,
-            values: vReshaped,
+            keys: kFinal,
+            values: vFinal,
             scale: scale,
             mask: finalMatrixBD
         )
@@ -254,9 +266,15 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
         var vReshaped = v.reshaped([batch, kSeq, nHeads, headDim]).transposed(axes: [0, 2, 1, 3])
         let pReshaped = p.reshaped([batch, posLen, nHeads, headDim]).transposed(axes: [0, 2, 1, 3])
 
-        // if let cache = cache {
-        //     k, v = cache.update_and_fetch_kv(k, v)
-        // }
+        var kFinal = kReshaped
+        var vFinal = vReshaped
+        
+        if let cache = cache {
+            // Update cache and get full key-value history
+            let (kCached, vCached) = cache.updateAndFetchKV(kReshaped, vReshaped)
+            kFinal = kCached
+            vFinal = vCached
+        }
 
         // Pad to fit context size
         let w = max(contextSize.0, contextSize.1)
@@ -340,7 +358,7 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
 
         let attn = MLX.softmax(finalScores, axis: -1)
         let maskedAttn = MLX.which(mask, MLXArray(0.0), attn)
-        let out = self.matmulPV(maskedAttn, vReshaped, w: w)
+        let out = self.matmulPV(maskedAttn, vFinal, w: w)
 
         let reshapedOut = out.reshaped([batch, -1, nHeads * headDim])
         let actualSeqLen = min(originalQSeq, reshapedOut.shape[1])
@@ -555,7 +573,7 @@ public class RelPositionMultiHeadLocalAttention: RelPositionMultiHeadAttention {
             // out[b, s_p, h, d]
             uint O_S_stride = D_v * H;
             uint O_B_stride = S_p * O_S_stride;
-    
+
             uint stick_p_v_idx = S_v - S_p + s_p_idx;
             // stick to right (assuming S_v >= S_p)
 
